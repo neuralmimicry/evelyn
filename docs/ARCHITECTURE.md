@@ -80,7 +80,7 @@ Each stage ships only when its gate passes. Results are recorded here.
 | 1 | Generic activation mapping: fit a neuron or population response to any activation (SiLU, GELU, tanh, …) rather than hard-coding, expressed in AARNN-native neuron terms | SwiGLU (true SiLU) rel. error < 5 % on random and real FFN blocks | **PASS 2026-10-05 (random blocks)**: true SwiGLU 1.40 %, GeGLU 1.37 % (stage-0 ReLU-fication gap 25 %); activation fits ReLU/SiLU/GELU/tanh/sigmoid/custom < 0.003 max error with 25–49 units. Real-model blocks are checked in stage 2. |
 | 2 | Importer for one real FFN layer of a ~9 B open-weights model (candidate: Qwen 3.5 9B, already served by llama.cpp on qc02; also Gemma/Llama 8–9 B), dequantised to f32 | per-layer rel. error < 5 % on activations captured from real prompts | **PASS 2026-10-05 (proxy inputs)**: Qwen 3.5 9B (`qwen35`, Q4_K/Q6_K) layers 0/16/31: spiking 2.74 % / 2.00 % / 1.42 %, analog population 0.37 % / 0.35 % / 0.21 %. Inputs were real token embeddings RMS-normalised with each layer's own norm; captured mid-network activations follow in stage 4. |
 | 3a | Fit population codes against AARNN's *measured* transfer curves (its own kernels, with membrane noise), with automatic population sizing per neuron model and detail depth | every activation < 0.01 max error on measured AARNN neurons | **PASS 2026-10-05**: LIF 0.007–0.009 (65–97 units); Izhikevich RS depth 0 and 2: 0.008 (129–385 units) |
-| 3b | AARNN knowledge region: instantiate the emitted neuron mesh with AARNN's biomimetic models and automatic detail selection, sharded across nodes; FFN-query API next to AER stimuli; plasticity off by default | AARNN layer output matches stage 2 within 1 % extra error; direct SNN stimuli unaffected | |
+| 3b | AARNN knowledge region: instantiate the emitted neuron mesh with AARNN's biomimetic models and automatic detail selection, sharded across nodes; FFN-query API next to AER stimuli; plasticity off by default | AARNN layer output matches stage 2 within 1 % extra error; direct SNN stimuli unaffected | **PASS 2026-10-05**: Qwen 3.5 9B layer 0 executed by AARNN (`aarnn-knowledge-run`, real LIF kernels, membrane noise, 40 shards): **1.84 %** vs exact layer (gate 3.74 %); spiking noise 0.78 %; analog mesh 1.57 %. 1.38 M neurons, 6.1 G neuron-steps, 7.5 s per token per layer on 40 qc02 cores. AARNN lib suite: see aarnn_rust#32 |
 | 4 | Evelyn runtime: full model with N converted layers (start with 1, grow); perplexity on a held-out set | ΔPPL vs original < 5 % with 1 layer converted; latency budget recorded; then scale layer by layer | |
 | 5 | Gail provider `evelyn/qwen3.5-9b-aarnn` (shadow first) | governed chats 200; quality spot-checks; no regression to other Gail routes | |
 | 6 | Continuous learning: AARNN plasticity on the knowledge region, with drift guards and rollback snapshots | no catastrophic-forgetting regressions on a fixed eval set; snapshots restorable | |
@@ -150,6 +150,37 @@ Each activation is a *heterogeneous-threshold population*:
   neurons of LIF for the same accuracy. In 3b, AARNN's detail selection
   should therefore choose the model per region, balancing fidelity against
   latency.
+
+## Stage 3b method and findings
+
+- **Mesh description** (`mesh.rs` → `aarnn_rust::knowledge_region::FfnMesh`):
+  - input and readout synapse matrices as raw f32 files;
+  - gate and up population codes;
+  - per-channel up synaptic scales;
+  - the exact AARNN neuron spec, membrane noise, steps and warm-up.
+- **Execution in AARNN:**
+  1. dendritic summation;
+  2. each active unit is a real AARNN neuron simulated with noise;
+  3. its rate is decoded through its output synapse;
+  4. active dendritic multiplication of gate and up;
+  5. synaptic readout.
+
+  Hidden channels are sharded in parallel, and noise streams are seeded per
+  neuron, so runs are reproducible in any shard layout.
+- **Per-channel synaptic scaling was essential.** A single up range shared
+  across channels gave 24 % analog error, because small channels were
+  swamped. Normalising each channel by its own calibrated range, so that one
+  identity code serves every channel, brought it to 1.57 %. Gate tolerances
+  must be absolute: most gate currents sit near zero.
+- **Latency is now the binding constraint:** 7.5 s per token per layer on
+  one 46-core node. Levers for stage 4:
+  - shard each layer across nodes (32 layers across the estate's qc, sm and
+    n1sdp nodes);
+  - fewer steps per token, using the dithered timing of stage 2 and shorter
+    warm-up;
+  - skip silent units (already done);
+  - cheaper neuron models for knowledge regions, chosen by detail selection;
+  - GPU kernels.
 
 ## Known risks
 
