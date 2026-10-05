@@ -24,6 +24,15 @@ pub struct MeasuredCurve {
     pub neuron: String,
     pub currents: Vec<f64>,
     pub rates: Vec<f64>,
+    /// Membrane-noise standard deviation the curve was measured with. A
+    /// knowledge region must run with the same noise.
+    #[serde(default)]
+    pub noise_std: f64,
+    /// The exact AARNN neuron configuration (`aarnn_rust::knowledge::
+    /// KnowledgeNeuron`, as JSON). It is copied verbatim into mesh
+    /// descriptions, so AARNN instantiates the neuron the code was fitted to.
+    #[serde(default)]
+    pub spec: Option<serde_json::Value>,
 }
 
 impl MeasuredCurve {
@@ -257,6 +266,16 @@ impl CurvePopulationCode {
             }
         }
         (best.expect("schedule is non-empty").0, false)
+    }
+
+    /// Rheobase of the fitted neuron model (current at zero drive).
+    pub fn rheobase(&self) -> f64 {
+        self.rheobase
+    }
+
+    /// Peak rate used to normalise unit responses.
+    pub fn max_rate(&self) -> f64 {
+        self.curve.max_rate()
     }
 
     pub fn eval(&self, z: f32) -> f32 {

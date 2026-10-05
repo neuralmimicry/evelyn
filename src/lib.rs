@@ -17,6 +17,7 @@ pub mod curve;
 pub mod dense;
 pub mod gguf;
 pub mod import;
+pub mod mesh;
 pub mod snn;
 
 /// Root-mean-square error between two equal-length vectors.
