@@ -284,7 +284,8 @@ fn unsupported(t: u32) -> io::Error {
     )
 }
 
-fn type_bytes(t: u32, n: usize) -> io::Result<usize> {
+/// Encoded size in bytes of `n` values of ggml type `t`.
+pub fn type_bytes(t: u32, n: usize) -> io::Result<usize> {
     Ok(match t {
         GGML_F32 => n * 4,
         GGML_F16 | GGML_BF16 => n * 2,
@@ -426,4 +427,25 @@ pub fn dequantize(t: u32, raw: &[u8], n: usize) -> io::Result<Vec<f32>> {
         ));
     }
     Ok(y)
+}
+
+impl Gguf {
+    /// Raw (still quantised) bytes of one tensor, plus its description. Used
+    /// by the runtime to keep weights quantised in memory and dequantise
+    /// row by row inside matrix-vector products.
+    pub fn tensor_raw(&mut self, name: &str) -> io::Result<(TensorInfo, Vec<u8>)> {
+        let t = self
+            .tensors
+            .get(name)
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::NotFound, format!("tensor {name} not found"))
+            })?
+            .clone();
+        let bytes = type_bytes(t.ggml_type, t.elements() as usize)?;
+        self.file
+            .seek(SeekFrom::Start(self.data_start + t.offset))?;
+        let mut raw = vec![0u8; bytes];
+        self.file.read_exact(&mut raw)?;
+        Ok((t, raw))
+    }
 }
