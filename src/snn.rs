@@ -188,29 +188,168 @@ impl SpikingPopulationGatedMlp {
         percentile: f32,
         knots: usize,
     ) -> Self {
-        let z: Vec<f32> = calibration
-            .iter()
-            .flat_map(|x| mlp.gate.forward(x))
-            .collect();
+        Self::convert_with_headroom(mlp, act, calibration, percentile, knots, 1.0)
+    }
+
+    /// As [`Self::convert`], with every dynamic range (gate input range, up
+    /// thresholds) widened by `headroom` (>= 1). Real LLM activations are
+    /// heavy-tailed, so ranges calibrated on a finite sample clip outliers.
+    /// Headroom trades that saturation error for lower firing rates, meaning
+    /// more spiking sampling noise at a given simulation length.
+    pub fn convert_with_headroom(
+        mlp: &SwiGluMlp,
+        act: crate::activation::Activation,
+        calibration: &[Vec<f32>],
+        percentile: f32,
+        knots: usize,
+        headroom: f32,
+    ) -> Self {
+        assert!(headroom >= 1.0, "headroom must be >= 1");
+        // Calibration forwards are independent, so they run in parallel across
+        // all available cores.
+        let (gate_z, up_u) = parallel_forwards(mlp, calibration);
+        let z: Vec<f32> = gate_z.into_iter().flatten().collect();
         let mut sorted = z.clone();
         sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
         let q = |p: f32| sorted[((sorted.len() as f32 - 1.0) * p).round() as usize];
-        let (lo, hi) = (q(1.0 - percentile), q(percentile));
+        let (lo, hi) = (q(1.0 - percentile) * headroom, q(percentile) * headroom);
         let code = crate::activation::PopulationCode::fit(act, lo, hi, knots);
         let theta_unit = code
             .units
             .iter()
             .map(|u| u.drive(lo).max(u.drive(hi)).max(1e-6))
             .collect();
-        let u: Vec<Vec<f32>> = calibration.iter().map(|x| mlp.up.forward(x)).collect();
+        let u = up_u;
         Self {
             gate: mlp.gate.clone(),
             up: mlp.up.clone(),
             down: mlp.down.clone(),
             code,
             theta_unit,
-            theta_up: thresholds(&u, percentile),
+            theta_up: thresholds(&u, percentile)
+                .into_iter()
+                .map(|t| t * headroom)
+                .collect(),
         }
+    }
+
+    /// Deterministic, dithered spike timing. Each stream fires on a
+    /// low-discrepancy (Weyl) phase sequence instead of independent random
+    /// draws. Up streams advance by the golden-ratio conjugate and population
+    /// units by sqrt(2) - 1, which are rationally independent, so each
+    /// (up, unit) coincidence pair is equidistributed. The product-rate error
+    /// therefore decays roughly as 1/T rather than 1/sqrt(T): the same
+    /// accuracy in far fewer timesteps, which is what keeps latency low. This
+    /// models regular-spiking neurons; per-stream phase offsets keep different
+    /// neurons desynchronised.
+    pub fn run_dithered(&self, x: &[f32], steps: usize) -> (Vec<f32>, u64) {
+        const BETA_UP: f64 = 0.618_033_988_749_894_9; // golden-ratio conjugate
+        const BETA_UNIT: f64 = 0.414_213_562_373_095_1; // sqrt(2) - 1
+        let z = self.gate.forward(x);
+        let pu: Vec<f64> = self
+            .up
+            .forward(x)
+            .iter()
+            .zip(&self.theta_up)
+            .map(|(a, t)| (a / t).clamp(-1.0, 1.0) as f64)
+            .collect();
+        let units = &self.code.units;
+        let hidden = z.len();
+        let mut spikes = 0u64;
+        let h: Vec<f32> = (0..hidden)
+            .map(|i| {
+                let pk: Vec<f64> = units
+                    .iter()
+                    .zip(&self.theta_unit)
+                    .map(|(u, t)| (u.drive(z[i]) / t).clamp(0.0, 1.0) as f64)
+                    .collect();
+                // Per-stream phase offsets (themselves a Weyl sequence over
+                // neuron and unit indices) desynchronise different neurons.
+                let off_up = (i as f64 * 0.754_877_666_246_692_7).fract();
+                let mut acc = 0.0f64;
+                let sign = pu[i].signum();
+                for t in 0..steps {
+                    let tf = t as f64;
+                    if (off_up + tf * BETA_UP).fract() >= pu[i].abs() {
+                        continue;
+                    }
+                    spikes += 1;
+                    acc += sign * self.code.tonic as f64;
+                    for (k, u) in units.iter().enumerate() {
+                        let off = ((i * units.len() + k) as f64 * 0.569_840_290_998_053_3).fract();
+                        if (off + tf * BETA_UNIT).fract() < pk[k] {
+                            spikes += 1;
+                            acc += sign * (u.weight * self.theta_unit[k]) as f64;
+                        }
+                    }
+                }
+                (acc / steps as f64) as f32 * self.theta_up[i]
+            })
+            .collect();
+        (self.down.forward(&h), spikes)
+    }
+
+    /// Infinite-time (rate-limit) output: isolates population-code fitting and
+    /// saturation error from spiking sampling noise.
+    pub fn run_analog(&self, x: &[f32]) -> Vec<f32> {
+        let z = self.gate.forward(x);
+        let u = self.up.forward(x);
+        let h: Vec<f32> = z
+            .iter()
+            .zip(u.iter().zip(&self.theta_up))
+            .map(|(zi, (ui, tu))| {
+                let g: f32 = self.code.tonic
+                    + self
+                        .code
+                        .units
+                        .iter()
+                        .zip(&self.theta_unit)
+                        .map(|(k, t)| k.weight * k.drive(*zi).min(*t))
+                        .sum::<f32>();
+                // The up neuron saturates at its threshold, exactly as when spiking.
+                g * ui.clamp(-tu, *tu)
+            })
+            .collect();
+        self.down.forward(&h)
+    }
+
+    /// Error decomposition for diagnosis: outputs with (a) the population fit
+    /// alone (no saturation), (b) plus gate-unit saturation, (c) plus
+    /// up-neuron saturation. (c) equals [`Self::run_analog`].
+    pub fn run_analog_decomposed(&self, x: &[f32]) -> [Vec<f32>; 3] {
+        let z = self.gate.forward(x);
+        let u = self.up.forward(x);
+        let fit = |zi: f32, clip: bool| -> f32 {
+            self.code.tonic
+                + self
+                    .code
+                    .units
+                    .iter()
+                    .zip(&self.theta_unit)
+                    .map(|(k, t)| {
+                        k.weight
+                            * if clip {
+                                k.drive(zi).min(*t)
+                            } else {
+                                k.drive(zi)
+                            }
+                    })
+                    .sum::<f32>()
+        };
+        let mk = |clip_gate: bool, clip_up: bool| -> Vec<f32> {
+            let h: Vec<f32> = (0..z.len())
+                .map(|i| {
+                    let up = if clip_up {
+                        u[i].clamp(-self.theta_up[i], self.theta_up[i])
+                    } else {
+                        u[i]
+                    };
+                    fit(z[i], clip_gate) * up
+                })
+                .collect();
+            self.down.forward(&h)
+        };
+        [mk(false, false), mk(true, false), mk(true, true)]
     }
 
     pub fn population_size(&self) -> usize {
@@ -262,4 +401,27 @@ impl SpikingPopulationGatedMlp {
             .collect();
         (self.down.forward(&h), spikes)
     }
+}
+
+/// Gate and up projections of every calibration sample, computed in parallel
+/// with scoped threads (one chunk per available core).
+fn parallel_forwards(mlp: &SwiGluMlp, calibration: &[Vec<f32>]) -> (Vec<Vec<f32>>, Vec<Vec<f32>>) {
+    let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
+    let chunk = calibration.len().div_ceil(threads).max(1);
+    std::thread::scope(|s| {
+        let handles: Vec<_> = calibration
+            .chunks(chunk)
+            .map(|part| {
+                s.spawn(move || {
+                    part.iter()
+                        .map(|x| (mlp.gate.forward(x), mlp.up.forward(x)))
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .flat_map(|h| h.join().expect("calibration worker panicked"))
+            .unzip()
+    })
 }

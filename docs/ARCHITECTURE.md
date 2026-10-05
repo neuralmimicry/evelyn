@@ -78,7 +78,7 @@ Each stage ships only when its gate passes. Results are recorded here.
 |---|---|---|---|
 | 0 | Conversion core (ReLU MLP, coincidence-gated FFN), deterministic tests | ReLU MLP rel. error < 5 % at T=2048; gated < 10 % at T=4096; error falls with T | **PASS 2026-10-05**: 3.9 %, 5.0 % |
 | 1 | Generic activation mapping: fit a neuron or population response to any activation (SiLU, GELU, tanh, …) rather than hard-coding, expressed in AARNN-native neuron terms | SwiGLU (true SiLU) rel. error < 5 % on random and real FFN blocks | **PASS 2026-10-05 (random blocks)**: true SwiGLU 1.40 %, GeGLU 1.37 % (stage-0 ReLU-fication gap 25 %); activation fits ReLU/SiLU/GELU/tanh/sigmoid/custom < 0.003 max error with 25–49 units. Real-model blocks are checked in stage 2. |
-| 2 | Importer for one real FFN layer of a ~9 B open-weights model (candidate: Qwen 3.5 9B, already served by llama.cpp on qc02; also Gemma/Llama 8–9 B), dequantised to f32 | per-layer rel. error < 5 % on activations captured from real prompts | |
+| 2 | Importer for one real FFN layer of a ~9 B open-weights model (candidate: Qwen 3.5 9B, already served by llama.cpp on qc02; also Gemma/Llama 8–9 B), dequantised to f32 | per-layer rel. error < 5 % on activations captured from real prompts | **PASS 2026-10-05 (proxy inputs)**: Qwen 3.5 9B (`qwen35`, Q4_K/Q6_K) layers 0/16/31: spiking 2.74 % / 2.00 % / 1.42 %, analog population 0.37 % / 0.35 % / 0.21 %. Inputs were real token embeddings RMS-normalised with each layer's own norm; captured mid-network activations follow in stage 4. |
 | 3 | AARNN knowledge region: instantiate the emitted neuron mesh with AARNN's biomimetic models and automatic detail selection, sharded across nodes; FFN-query API next to AER stimuli; plasticity off by default | AARNN layer output matches stage 2 within 1 % extra error; direct SNN stimuli unaffected | |
 | 4 | Evelyn runtime: full model with N converted layers (start with 1, grow); perplexity on a held-out set | ΔPPL vs original < 5 % with 1 layer converted; latency budget recorded; then scale layer by layer | |
 | 5 | Gail provider `evelyn/qwen3.5-9b-aarnn` (shadow first) | governed chats 200; quality spot-checks; no regression to other Gail routes | |
@@ -99,6 +99,35 @@ Each activation is a *heterogeneous-threshold population*:
 - **Biology:** the result is the population and threshold-diversity code that
   real neural populations use. AARNN instantiates these units with its own
   neuron models (principle 2).
+
+## Stage 2 method and findings
+
+- **Importer** (`gguf.rs`, `import.rs`): a pure-Rust GGUF v2/v3 reader. It
+  reads only the tensors it needs and dequantises F32/F16/BF16/Q8_0/Q4_K/Q5_K/Q6_K.
+  The FFN layout comes from tensor names, so there is no per-model code.
+  Activation comes from metadata, or failing that the family default.
+- **Saturation dominates real layers, not fitting.** With ranges set from 64
+  samples at the 99.9th percentile:
+  - the fit alone was 0.3–0.7 %;
+  - gate and up-neuron clipping took the error to 11 %, because LLM
+    activations are heavy-tailed.
+
+  Calibrating 512 samples at the maximum with 2× headroom (gain control)
+  gives 0.37 % analog error.
+- **Dithered spike timing.** Low-discrepancy, regular-spiking streams with
+  rationally independent phase increments reduce coincidence sampling error
+  roughly as 1/T, against 1/sqrt(T) for random spikes. At T=1024 that is
+  6.0 % against 25.4 %, so the same accuracy needs far fewer timesteps and
+  latency stays low.
+- **Performance:** calibration and verification run on every core with
+  scoped threads. Conversion of one layer takes 2.5 s on qc02, down from 61 s
+  single-threaded.
+- **Reproduce:** `cargo run --release --bin evelyn-verify-layer -- <model.gguf> <layer>`
+  (the defaults are the recommended settings). It exits non-zero on a gate
+  failure.
+- **Cost signal for stage 3:** about 33–39 M spikes per token per layer at
+  T=4096. Sharding across nodes and lowering T, with tighter ranges and
+  AARNN's detail selection, are the latency levers.
 
 ## Known risks
 

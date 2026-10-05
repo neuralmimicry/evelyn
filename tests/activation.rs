@@ -23,7 +23,7 @@ fn population_code_fits_every_model_activation() {
             code.units.len() + 1
         );
         assert!(err < 0.01, "{name}: max error {err}");
-        assert_eq!(Activation::from_name(name).is_some(), true);
+        assert!(Activation::from_name(name).is_some());
     }
 }
 
