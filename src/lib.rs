@@ -18,6 +18,7 @@ pub mod dense;
 pub mod gguf;
 pub mod import;
 pub mod mesh;
+pub mod remote;
 pub mod runtime;
 pub mod snn;
 
