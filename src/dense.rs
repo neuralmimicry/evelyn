@@ -116,6 +116,15 @@ impl SwiGluMlp {
         self.down.forward(&h)
     }
 
+    /// Gated block with any activation on the gate (SwiGLU = SiLU, GeGLU =
+    /// GELU, ReGLU = ReLU, ...).
+    pub fn forward_act(&self, x: &[f32], act: crate::activation::Activation) -> Vec<f32> {
+        let g: Vec<f32> = self.gate.forward(x).iter().map(|z| act.apply(*z)).collect();
+        let u = self.up.forward(x);
+        let h: Vec<f32> = g.iter().zip(&u).map(|(a, b)| a * b).collect();
+        self.down.forward(&h)
+    }
+
     /// ReLU-gated variant (`ReGLU`): what a rate-coded spiking gate computes
     /// natively. The gap to [`Self::forward`] is the "ReLU-fication" error that
     /// stage 1 must close (fine-tuning or a SiLU-shaped neuron response).

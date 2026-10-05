@@ -163,3 +163,103 @@ impl SpikingGatedMlp {
         (self.down.forward(&h), spikes)
     }
 }
+
+/// Gated block whose gate uses any activation (stage 1), encoded as a fitted
+/// heterogeneous-threshold population per hidden unit. Since
+/// `act(z) * u = tonic * u + sum_k w_k * unit_k(z) * u`, each population unit
+/// gets its own coincidence detector with the up neuron. The model's true
+/// SiLU/GELU gate is reproduced without ReLU-fication or fine-tuning.
+#[derive(Clone, Debug)]
+pub struct SpikingPopulationGatedMlp {
+    gate: Dense,
+    up: Dense,
+    down: Dense,
+    code: crate::activation::PopulationCode,
+    /// Per-unit saturation threshold (max drive over the calibrated range).
+    theta_unit: Vec<f32>,
+    theta_up: Vec<f32>,
+}
+
+impl SpikingPopulationGatedMlp {
+    pub fn convert(
+        mlp: &SwiGluMlp,
+        act: crate::activation::Activation,
+        calibration: &[Vec<f32>],
+        percentile: f32,
+        knots: usize,
+    ) -> Self {
+        let z: Vec<f32> = calibration
+            .iter()
+            .flat_map(|x| mlp.gate.forward(x))
+            .collect();
+        let mut sorted = z.clone();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let q = |p: f32| sorted[((sorted.len() as f32 - 1.0) * p).round() as usize];
+        let (lo, hi) = (q(1.0 - percentile), q(percentile));
+        let code = crate::activation::PopulationCode::fit(act, lo, hi, knots);
+        let theta_unit = code
+            .units
+            .iter()
+            .map(|u| u.drive(lo).max(u.drive(hi)).max(1e-6))
+            .collect();
+        let u: Vec<Vec<f32>> = calibration.iter().map(|x| mlp.up.forward(x)).collect();
+        Self {
+            gate: mlp.gate.clone(),
+            up: mlp.up.clone(),
+            down: mlp.down.clone(),
+            code,
+            theta_unit,
+            theta_up: thresholds(&u, percentile),
+        }
+    }
+
+    pub fn population_size(&self) -> usize {
+        self.code.units.len() + 1
+    }
+
+    pub fn run(&self, x: &[f32], steps: usize, rng: &mut Rng) -> (Vec<f32>, u64) {
+        let z = self.gate.forward(x);
+        let pu: Vec<f32> = self
+            .up
+            .forward(x)
+            .iter()
+            .zip(&self.theta_up)
+            .map(|(a, t)| (a / t).clamp(-1.0, 1.0))
+            .collect();
+        let hidden = z.len();
+        let units = &self.code.units;
+        // Firing probability of every population unit for every hidden neuron.
+        let pk: Vec<Vec<f32>> = z
+            .iter()
+            .map(|zi| {
+                units
+                    .iter()
+                    .zip(&self.theta_unit)
+                    .map(|(u, t)| (u.drive(*zi) / t).clamp(0.0, 1.0))
+                    .collect()
+            })
+            .collect();
+        let mut acc = vec![0.0f32; hidden];
+        let mut spikes = 0u64;
+        for _ in 0..steps {
+            for i in 0..hidden {
+                if rng.uniform() >= pu[i].abs() {
+                    continue; // no up spike: no coincidence possible this step
+                }
+                spikes += 1;
+                let sign = pu[i].signum();
+                acc[i] += sign * self.code.tonic; // tonic unit always coincides
+                for (k, u) in units.iter().enumerate() {
+                    if rng.uniform() < pk[i][k] {
+                        spikes += 1;
+                        acc[i] += sign * u.weight * self.theta_unit[k];
+                    }
+                }
+            }
+        }
+        let h: Vec<f32> = (0..hidden)
+            .map(|i| acc[i] / steps as f32 * self.theta_up[i])
+            .collect();
+        (self.down.forward(&h), spikes)
+    }
+}

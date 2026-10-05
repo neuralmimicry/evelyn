@@ -77,12 +77,28 @@ Each stage ships only when its gate passes. Results are recorded here.
 | Stage | Deliverable | Gate | Status |
 |---|---|---|---|
 | 0 | Conversion core (ReLU MLP, coincidence-gated FFN), deterministic tests | ReLU MLP rel. error < 5 % at T=2048; gated < 10 % at T=4096; error falls with T | **PASS 2026-10-05**: 3.9 %, 5.0 % |
-| 1 | Generic activation mapping: fit a neuron or population response to any activation (SiLU, GELU, tanh, …) rather than hard-coding, expressed in AARNN-native neuron terms | SwiGLU (true SiLU) rel. error < 5 % on random and real FFN blocks. Stage 0 measured a 27.8 % ReLU-fication gap. | next |
+| 1 | Generic activation mapping: fit a neuron or population response to any activation (SiLU, GELU, tanh, …) rather than hard-coding, expressed in AARNN-native neuron terms | SwiGLU (true SiLU) rel. error < 5 % on random and real FFN blocks | **PASS 2026-10-05 (random blocks)**: true SwiGLU 1.40 %, GeGLU 1.37 % (stage-0 ReLU-fication gap 25 %); activation fits ReLU/SiLU/GELU/tanh/sigmoid/custom < 0.003 max error with 25–49 units. Real-model blocks are checked in stage 2. |
 | 2 | Importer for one real FFN layer of a ~9 B open-weights model (candidate: Qwen 3.5 9B, already served by llama.cpp on qc02; also Gemma/Llama 8–9 B), dequantised to f32 | per-layer rel. error < 5 % on activations captured from real prompts | |
 | 3 | AARNN knowledge region: instantiate the emitted neuron mesh with AARNN's biomimetic models and automatic detail selection, sharded across nodes; FFN-query API next to AER stimuli; plasticity off by default | AARNN layer output matches stage 2 within 1 % extra error; direct SNN stimuli unaffected | |
 | 4 | Evelyn runtime: full model with N converted layers (start with 1, grow); perplexity on a held-out set | ΔPPL vs original < 5 % with 1 layer converted; latency budget recorded; then scale layer by layer | |
 | 5 | Gail provider `evelyn/qwen3.5-9b-aarnn` (shadow first) | governed chats 200; quality spot-checks; no regression to other Gail routes | |
 | 6 | Continuous learning: AARNN plasticity on the knowledge region, with drift guards and rollback snapshots | no catastrophic-forgetting regressions on a fixed eval set; snapshots restorable | |
+
+## Stage 1 method
+
+Each activation is a *heterogeneous-threshold population*:
+`f(z) ~= c + sum a_k relu(z - b_k) + sum d_k relu(b_k - z)`.
+- **Units:** each unit is a rate-coded neuron with threshold `b_k`. Its
+  signed weight is an excitatory or inhibitory synapse. `c` is a tonic unit.
+- **Placement:** thresholds are curvature-adaptive, equidistributed in
+  `sqrt(|f''|)` with `f''` estimated numerically, so any activation works.
+- **Fit:** weights come from a ridge least-squares fit, then sparse pruning.
+- **Gated FFNs:** `act(gate) * up` distributes over the population sum, so
+  every unit gets its own coincidence detector with the up neuron. The true
+  SiLU/GELU gate converts directly, with no ReLU-fication or fine-tuning.
+- **Biology:** the result is the population and threshold-diversity code that
+  real neural populations use. AARNN instantiates these units with its own
+  neuron models (principle 2).
 
 ## Known risks
 

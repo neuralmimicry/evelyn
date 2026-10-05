@@ -7,8 +7,12 @@
 //! * [`snn`] - integrate-and-fire populations, data-based threshold balancing,
 //!   rate-coded ANN->SNN conversion and coincidence-detection gating
 //!
+//! * [`activation`] - model-agnostic activation mapping: any activation is
+//!   fitted as a heterogeneous-threshold neuron population (stage 1)
+//!
 //! See `docs/ARCHITECTURE.md` for the staged plan and verification gates.
 
+pub mod activation;
 pub mod dense;
 pub mod snn;
 
