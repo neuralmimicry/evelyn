@@ -145,7 +145,7 @@ impl PopulationCode {
         for i in 1..n {
             ata[i * n + i] += ridge;
         }
-        let coef = solve(&mut ata, &mut aty, n);
+        let coef = solve_dense(&mut ata, &mut aty, n);
         let scale = coef[1..].iter().fold(0.0f64, |m, c| m.max(c.abs()));
         let units = basis
             .iter()
@@ -223,7 +223,9 @@ fn curvature_knots(act: Activation, lo: f32, hi: f32, knots: usize) -> Vec<f32> 
 }
 
 /// Gaussian elimination with partial pivoting (small dense systems).
-fn solve(a: &mut [f64], b: &mut [f64], n: usize) -> Vec<f64> {
+/// Dense linear solve (Gaussian elimination, partial pivoting) for the small
+/// normal-equation systems of population fitting.
+pub fn solve_dense(a: &mut [f64], b: &mut [f64], n: usize) -> Vec<f64> {
     for col in 0..n {
         let piv = (col..n)
             .max_by(|&i, &j| {

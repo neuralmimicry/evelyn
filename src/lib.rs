@@ -13,6 +13,7 @@
 //! See `docs/ARCHITECTURE.md` for the staged plan and verification gates.
 
 pub mod activation;
+pub mod curve;
 pub mod dense;
 pub mod gguf;
 pub mod import;

@@ -79,7 +79,8 @@ Each stage ships only when its gate passes. Results are recorded here.
 | 0 | Conversion core (ReLU MLP, coincidence-gated FFN), deterministic tests | ReLU MLP rel. error < 5 % at T=2048; gated < 10 % at T=4096; error falls with T | **PASS 2026-10-05**: 3.9 %, 5.0 % |
 | 1 | Generic activation mapping: fit a neuron or population response to any activation (SiLU, GELU, tanh, …) rather than hard-coding, expressed in AARNN-native neuron terms | SwiGLU (true SiLU) rel. error < 5 % on random and real FFN blocks | **PASS 2026-10-05 (random blocks)**: true SwiGLU 1.40 %, GeGLU 1.37 % (stage-0 ReLU-fication gap 25 %); activation fits ReLU/SiLU/GELU/tanh/sigmoid/custom < 0.003 max error with 25–49 units. Real-model blocks are checked in stage 2. |
 | 2 | Importer for one real FFN layer of a ~9 B open-weights model (candidate: Qwen 3.5 9B, already served by llama.cpp on qc02; also Gemma/Llama 8–9 B), dequantised to f32 | per-layer rel. error < 5 % on activations captured from real prompts | **PASS 2026-10-05 (proxy inputs)**: Qwen 3.5 9B (`qwen35`, Q4_K/Q6_K) layers 0/16/31: spiking 2.74 % / 2.00 % / 1.42 %, analog population 0.37 % / 0.35 % / 0.21 %. Inputs were real token embeddings RMS-normalised with each layer's own norm; captured mid-network activations follow in stage 4. |
-| 3 | AARNN knowledge region: instantiate the emitted neuron mesh with AARNN's biomimetic models and automatic detail selection, sharded across nodes; FFN-query API next to AER stimuli; plasticity off by default | AARNN layer output matches stage 2 within 1 % extra error; direct SNN stimuli unaffected | |
+| 3a | Fit population codes against AARNN's *measured* transfer curves (its own kernels, with membrane noise), with automatic population sizing per neuron model and detail depth | every activation < 0.01 max error on measured AARNN neurons | **PASS 2026-10-05**: LIF 0.007–0.009 (65–97 units); Izhikevich RS depth 0 and 2: 0.008 (129–385 units) |
+| 3b | AARNN knowledge region: instantiate the emitted neuron mesh with AARNN's biomimetic models and automatic detail selection, sharded across nodes; FFN-query API next to AER stimuli; plasticity off by default | AARNN layer output matches stage 2 within 1 % extra error; direct SNN stimuli unaffected | |
 | 4 | Evelyn runtime: full model with N converted layers (start with 1, grow); perplexity on a held-out set | ΔPPL vs original < 5 % with 1 layer converted; latency budget recorded; then scale layer by layer | |
 | 5 | Gail provider `evelyn/qwen3.5-9b-aarnn` (shadow first) | governed chats 200; quality spot-checks; no regression to other Gail routes | |
 | 6 | Continuous learning: AARNN plasticity on the knowledge region, with drift guards and rollback snapshots | no catastrophic-forgetting regressions on a fixed eval set; snapshots restorable | |
@@ -128,6 +129,27 @@ Each activation is a *heterogeneous-threshold population*:
 - **Cost signal for stage 3:** about 33–39 M spikes per token per layer at
   T=4096. Sharding across nodes and lowering T, with tighter ranges and
   AARNN's detail selection, are the latency levers.
+
+## Stage 3a method and findings
+
+- **AARNN measures, Evelyn fits** (modular; nothing is duplicated). aarnn_rust's
+  `knowledge` module drives its own LIF and Izhikevich/AARNN kernels and
+  exports transfer curves (`aarnn-knowledge-curves`). Evelyn fits against
+  them as data, with no code dependency on AARNN.
+- **Discrete-time staircase.** A constant drive gives an integer firing
+  period, so a noiseless AARNN neuron's f-I curve is a staircase (1/6, 1/7,
+  ...), with a narrow dynamic range: LIF rheobase 0.049, saturation 0.19.
+  Biological membrane noise (20 % of the rheobase-to-saturation span) grades
+  it into a smooth response. Knowledge regions must run with the same noise.
+- **Saturating units need even spacing.** Shifted copies of one saturating
+  response sum to a near-exact line, so thresholds are uniform here, unlike
+  the curvature-adaptive placement used for ideal rectifiers. The fit uses a
+  15 % margin beyond the range (no edge error), a floor on response width, a
+  dense grid and light ridge regularisation.
+- **Size cost.** Richer AARNN dynamics (Izhikevich) need about 4x the
+  neurons of LIF for the same accuracy. In 3b, AARNN's detail selection
+  should therefore choose the model per region, balancing fidelity against
+  latency.
 
 ## Known risks
 
