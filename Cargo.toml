@@ -1,0 +1,12 @@
+[package]
+description = "Evelyn: transformer LLM whose feed-forward knowledge runs on the AARNN spiking system neural network"
+license = "Apache-2.0"
+repository = "https://github.com/neuralmimicry/evelyn"
+name = "evelyn"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+
+[profile.test]
+opt-level = 3
