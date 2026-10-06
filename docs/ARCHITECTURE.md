@@ -83,9 +83,97 @@ Each stage ships only when its gate passes. Results are recorded here.
 | 3b | AARNN knowledge region: instantiate the emitted neuron mesh with AARNN's biomimetic models and automatic detail selection, sharded across nodes; FFN-query API next to AER stimuli; plasticity off by default | AARNN layer output matches stage 2 within 1 % extra error; direct SNN stimuli unaffected | **PASS 2026-10-05**: Qwen 3.5 9B layer 0 executed by AARNN (`aarnn-knowledge-run`, real LIF kernels, membrane noise, 40 shards): **1.84 %** vs exact layer (gate 3.74 %); spiking noise 0.78 %; analog mesh 1.57 %. 1.38 M neurons, 6.1 G neuron-steps, 7.5 s per token per layer on 40 qc02 cores. AARNN lib suite: see aarnn_rust#32 |
 | 4a | Pure-Rust transformer runtime (GGUF, quantised in memory, parallel, KV cache, pluggable FFN) | greedy output identical to llama.cpp | **PASS 2026-10-05**: qwen3:8b, 24/24 tokens identical; PPL 2.874; 1.14 tok/s on qc02 |
 | 4b | One real layer's FFN served live by AARNN (network service) inside the runtime, calibrated on real activations | ΔPPL < 5 %, no fallbacks | **PASS 2026-10-05**: qwen3:8b layer 18 on AARNN LIF: PPL 4.0337 → 4.0332 (−0.01 %), top-1 agreement 100 %, 0 fallbacks; 7.2 s/token (vs 0.9 dense) |
-| 4c | Scale to many layers across estate nodes; latency budget | ΔPPL < 5 % with N layers; latency trend | next |
-| 5 | Gail provider `evelyn/qwen3.5-9b-aarnn` (shadow first) | governed chats 200; quality spot-checks; no regression to other Gail routes | |
+| 4c | Scale to many layers across estate nodes; minimize measured latency | ΔPPL < 5 % with N layers; latency trend; zero dense fallbacks | **PASS 2026-10-05**: qwen3:8b real-activation LIF layers 18–21 served across qc04/qc05. The lowest complete passing budget tested was 119 neuron steps / 11 warm-up steps: N=1/2/4 all pass; N=2 spans both hosts at +4.288 % ΔPPL, 100 % top-1, 1.313 s/token and zero retries/fallbacks on 32 README tokens. A 64-token confirmation passes at +3.755 % ΔPPL, 98.44 % top-1 and 1.311 s/token. Lower budgets 118, 117, 112, 100 and 62 fail the N=2 quality gate. Full evidence is in `swarmhpc/docs/evidence/evelyn-stage4c-20261005-*`. |
+| 5 | Gail provider `evelyn/qwen3.5-9b-aarnn` (shadow first) | governed chats 200; quality spot-checks; no regression to other Gail routes | **IMPLEMENTATION IN PROGRESS 2026-10-05**: authenticated OpenAI-compatible `evelyn-serve`, multi-host AARNN route validation, and opt-in explicit-only Gail profile are implemented; the hosted 200-chat/quality/regression gate remains pending |
 | 6 | Continuous learning: AARNN plasticity on the knowledge region, with drift guards and rollback snapshots | no catastrophic-forgetting regressions on a fixed eval set; snapshots restorable | |
+
+### Stage 4c sweep tool
+
+`evelyn-scale` reads a versioned JSON route manifest mapping model layer indexes
+to `host:port` AARNN knowledge-region endpoints, then evaluates increasing
+layer counts against the same teacher-forced text. Its largest sweep must use
+at least two distinct hosts. The report includes perplexity delta, top-1
+agreement, whole-runtime seconds per token, and each remote layer's calls,
+mean/max latency, retries and failures. It exits non-zero unless every sweep
+stays within an absolute 5% perplexity delta with zero dense fallbacks. It
+reports the measured latency trend at each layer count so placements can be
+ranked by the lowest observed latency; there is no arbitrary ceiling.
+
+Example manifest (replace the endpoints with the deployed AARNN service
+addresses):
+
+```json
+{
+  "schema_version": 1,
+  "routes": {
+    "12": "aarnn-qc02.example:38112",
+    "18": "aarnn-qc03.example:38118",
+    "24": "aarnn-sm01.example:38124",
+    "30": "aarnn-n1sdp.example:38130"
+  }
+}
+```
+
+Run the requested increasing layer counts with:
+
+```sh
+cargo run --release --bin evelyn-scale -- model.gguf http://llama-server:8080 eval.txt 256 routes.json 1,2,4
+```
+
+The executable provides the sweep and evidence format; it does not provision
+knowledge regions. **Stage 4c passed on 2026-10-05.** On qc04/qc05, the 119-step
+N=1/2/4 sweep passed with zero fallbacks; the fastest multi-host point was
+N=2 at 1.313 s/token. Its 64-token confirmation passed at 1.311 s/token.
+Lower budgets were measured through 62 steps; 119/11 was the lowest complete
+passing configuration among the tested counts. The dense baseline measured
+0.595 s/token on 32 tokens and 0.642 s/token on 64 tokens, so the AARNN-backed multi-host path remains slower than dense; 119/11 is the fastest passing SNN configuration measured, and reducing that gap remains future performance work.
+
+Mesh runtime is a second latency variable. `evelyn-layer-mesh` accepts an
+optional final `steps` argument (default 4000) and sets warm-up to one tenth
+of that count. Re-export the same routed layers at successively lower step
+counts, then run the same text and layer-count sweep; retain the lowest
+measured latency only while every perplexity and fallback gate still passes.
+This makes the biological simulation budget evidence-driven rather than
+assuming the stage-3b 4000-step setting is optimal for transformer quality.
+
+```sh
+cargo run --release --bin evelyn-layer-mesh -- model.gguf 18 curves.json lif mesh-layer18 http://llama-server:8080 eval.txt 256 2.0 1000
+```
+
+### Stage 5 shadow provider
+
+`evelyn-serve` exposes the Rust runtime through Gail's existing OpenAI-compatible
+provider adapter. It accepts text-only Qwen chat completions, tokenises and
+detokenises through the matching llama.cpp tokenizer endpoint, and routes the
+configured FFN layers to the AARNN endpoints in a version-1 route manifest.
+The tokenizer parses Qwen special tokens, and the AARNN TCP connections remain
+open between requests. The manifest must use at least two distinct hosts. The
+service requires `EVELYN_API_KEY` with at least 32 bytes; health is available
+at `/healthz`, while `/v1/models` and `/v1/chat/completions` require the bearer
+key. If any AARNN layer falls back to dense weights, Evelyn rejects that
+completion with HTTP 503 so Gail never receives a response that silently
+bypassed AARNN. Greedy and temperature sampling are supported; text-only
+JSON-object mode is validated before a response is returned.
+
+```sh
+EVELYN_API_KEY="$EVELYN_API_KEY" cargo run --release --bin evelyn-serve -- \
+  qwen3.5-9b.gguf http://llama-server:8080 docs/evidence/qwen35-routes.json 0.0.0.0:8080
+```
+
+Gail's standard `openai` adapter can address this as
+`evelyn/qwen3.5-9b-aarnn`. In the SwarmHPC Ansible role, the profile is
+optional and appears only when `EVELYN_AARNN_BASE_URL` is set. It has the
+dedicated `evelyn_shadow` role and zero candidate weight, so normal `gail-auto`
+selection and existing routes are unchanged; governed evaluation requests
+select the explicit Evelyn model alias through Gail. The shared bearer secret
+is supplied as `EVELYN_API_KEY` to both services.
+
+**Stage 5 is not yet passed.** Software tests cover authentication, the Qwen
+text-chat template and system instructions, greedy sampling, rejection of
+unsupported multimodal/tool input, and the two-host route requirement. The 9B
+Qwen 3.5 mesh endpoints must be staged and the opt-in Gail profile enabled
+before collecting 200 governed shadow chats, quality spot-checks, and
+regression evidence for existing Gail routes.
 
 ## Stage 1 method
 
