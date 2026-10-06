@@ -84,7 +84,7 @@ Each stage ships only when its gate passes. Results are recorded here.
 | 4a | Pure-Rust transformer runtime (GGUF, quantised in memory, parallel, KV cache, pluggable FFN) | greedy output identical to llama.cpp | **PASS 2026-10-05**: qwen3:8b, 24/24 tokens identical; PPL 2.874; 1.14 tok/s on qc02 |
 | 4b | One real layer's FFN served live by AARNN (network service) inside the runtime, calibrated on real activations | ΔPPL < 5 %, no fallbacks | **PASS 2026-10-05**: qwen3:8b layer 18 on AARNN LIF: PPL 4.0337 → 4.0332 (−0.01 %), top-1 agreement 100 %, 0 fallbacks; 7.2 s/token (vs 0.9 dense) |
 | 4c | Scale to many layers across estate nodes; minimize measured latency | ΔPPL < 5 % with N layers; latency trend; zero dense fallbacks | **PASS 2026-10-05**: qwen3:8b real-activation LIF layers 18–21 served across qc04/qc05. The lowest complete passing budget tested was 119 neuron steps / 11 warm-up steps: N=1/2/4 all pass; N=2 spans both hosts at +4.288 % ΔPPL, 100 % top-1, 1.313 s/token and zero retries/fallbacks on 32 README tokens. A 64-token confirmation passes at +3.755 % ΔPPL, 98.44 % top-1 and 1.311 s/token. Lower budgets 118, 117, 112, 100 and 62 fail the N=2 quality gate. Full evidence is in `swarmhpc/docs/evidence/evelyn-stage4c-20261005-*`. |
-| 5 | Gail provider `evelyn/qwen3.5-9b-aarnn` (shadow first) | governed chats 200; quality spot-checks; no regression to other Gail routes | **IMPLEMENTATION IN PROGRESS 2026-10-05**: authenticated OpenAI-compatible `evelyn-serve`, multi-host AARNN route validation, and opt-in explicit-only Gail profile are implemented; the hosted 200-chat/quality/regression gate remains pending |
+| 5 | Gail provider `evelyn/qwen3.5-9b-aarnn` (shadow first) | governed chats 200; quality spot-checks; no regression to other Gail routes | **IMPLEMENTATION IN PROGRESS 2026-10-06**: authenticated `evelyn-serve`, opt-in Gail profile, and Qwen3.5 hybrid attention/gated-delta runtime are implemented on `codex/qwen35-hybrid-runtime-20261006`. Dense greedy output matched llama.cpp for 32/32 generated tokens on the live 9B GGUF. Real-activation layer-0 mesh calibration now passes the analog 5% gate at 4x headroom (4.36% held-out error over 32 samples); AARNN execution and the hosted 200-chat/quality/regression gate remain pending. |
 | 6 | Continuous learning: AARNN plasticity on the knowledge region, with drift guards and rollback snapshots | no catastrophic-forgetting regressions on a fixed eval set; snapshots restorable | |
 
 ### Stage 4c sweep tool
@@ -155,6 +155,25 @@ completion with HTTP 503 so Gail never receives a response that silently
 bypassed AARNN. Greedy and temperature sampling are supported; text-only
 JSON-object mode is validated before a response is returned.
 
+The `qwen35` runtime handles its three gated-delta layers followed by one full
+attention layer, using the GGUF's layer-indexed KV-head counts, post-attention
+normalisation, interleaved 64-dimension MRoPE, query gates, causal depthwise
+convolution, and per-session recurrent state. Full attention and SSM state are
+kept separate per request. On qc02's Q4_K_M Qwen3.5 9B model, `evelyn-generate`
+matched llama.cpp's greedy continuation exactly for 32 tokens (and for two
+shorter 1- and 16-token checks). A fresh run of the AArch64 release binary on
+qc02 matched 32/32 tokens at 1.37 tokens/s; its `/v1/models` endpoint returned
+HTTP 200 for `qwen3.5:9b`. This is dense-runtime parity; it does not yet verify
+an AARNN-routed mesh.
+
+The first real-activation mesh trials used the measured LIF curve, 119 neuron
+steps and 2x headroom. Held-out analog error was 8.76% (128 samples), 6.94%
+(256) and 6.27% (512), above the 5% target. A 256-sample calibration with 4x
+headroom reduced held-out error to **4.36%** (224 calibration and 32 held-out
+samples; 129 gate units and 33 up units), passing the analog mesh gate. This
+is a local analog check: the resulting mesh has not yet been executed by
+AARNN, so it does not establish spiking quality or a routed chat result.
+
 ```sh
 EVELYN_API_KEY="$EVELYN_API_KEY" cargo run --release --bin evelyn-serve -- \
   qwen3.5-9b.gguf http://llama-server:8080 docs/evidence/qwen35-routes.json 0.0.0.0:8080
@@ -168,12 +187,16 @@ selection and existing routes are unchanged; governed evaluation requests
 select the explicit Evelyn model alias through Gail. The shared bearer secret
 is supplied as `EVELYN_API_KEY` to both services.
 
-**Stage 5 is not yet passed.** Software tests cover authentication, the Qwen
-text-chat template and system instructions, greedy sampling, rejection of
-unsupported multimodal/tool input, and the two-host route requirement. The 9B
-Qwen 3.5 mesh endpoints must be staged and the opt-in Gail profile enabled
-before collecting 200 governed shadow chats, quality spot-checks, and
-regression evidence for existing Gail routes.
+**Stage 5 is not yet passed.** The full release suite passes (24 tests),
+formatting passes, dense greedy parity is exact for 32 generated tokens, and
+all binaries cross-build for AArch64 with the explicit GNU cross-linker.
+Software tests cover
+authentication, the Qwen text-chat template and system instructions, greedy
+sampling, rejection of unsupported multimodal/tool input, and the two-host
+route requirement. The Qwen 3.5 mesh still needs execution and validation by
+AARNN; after its endpoints are staged and the opt-in Gail profile is enabled,
+collect 200 governed shadow chats, quality spot-checks, and regression
+evidence for existing Gail routes.
 
 ## Stage 1 method
 
