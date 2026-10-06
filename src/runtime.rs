@@ -52,6 +52,15 @@ impl QMatrix {
 
     /// One dequantised row (used for embedding lookups).
     pub fn row(&self, r: usize) -> io::Result<Vec<f32>> {
+        if r >= self.rows {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "embedding row {r} is outside matrix vocabulary {}",
+                    self.rows
+                ),
+            ));
+        }
         dequantize(
             self.ggml_type,
             &self.data[r * self.row_bytes..(r + 1) * self.row_bytes],
@@ -92,6 +101,23 @@ pub struct Config {
     pub rope_base: f32,
     pub eps: f32,
     pub vocab: usize,
+    /// End-of-sequence token from GGUF tokenizer metadata, when present.
+    pub eos_token_id: Option<u32>,
+}
+
+/// Reject token IDs from a tokenizer whose vocabulary does not match the
+/// loaded GGUF. This keeps a model/tokenizer mismatch from becoming an index
+/// panic during embedding lookup.
+pub fn validate_token_ids(tokens: &[u32], vocab: usize) -> io::Result<()> {
+    if let Some(id) = tokens.iter().find(|&&id| id as usize >= vocab) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "token ID {id} is outside model vocabulary ({vocab}); check that tokenizer and GGUF match"
+            ),
+        ));
+    }
+    Ok(())
 }
 
 /// Feed-forward provider for one layer: dense weights or an AARNN region.
@@ -164,9 +190,13 @@ impl Model {
                 .tensors
                 .get("token_embd.weight")
                 .map_or(0, |t| t.dims[1] as usize),
+            eos_token_id: g
+                .meta("tokenizer.ggml.eos_token_id")
+                .and_then(Value::as_u64)
+                .and_then(|id| u32::try_from(id).ok()),
             arch: arch.clone(),
         };
-        let mut mat = |g: &mut Gguf, n: &str| -> io::Result<QMatrix> {
+        let mat = |g: &mut Gguf, n: &str| -> io::Result<QMatrix> {
             let (t, raw) = g.tensor_raw(n)?;
             QMatrix::from_raw(&t, raw)
         };
@@ -278,6 +308,7 @@ impl<'m> Session<'m> {
     pub fn step(&mut self, token: u32, ffn: &dyn FfnBackend) -> io::Result<Vec<f32>> {
         let m = self.model;
         let c = &m.cfg;
+        validate_token_ids(&[token], c.vocab)?;
         let mut x = m.embed.row(token as usize)?;
         let group = c.heads / c.kv_heads;
         for (li, l) in m.layers.iter().enumerate() {
@@ -345,6 +376,39 @@ impl<'m> Session<'m> {
         }
         self.pos += 1;
         Ok(m.lm_head.matvec(&rms_norm(&x, &m.out_norm, c.eps)))
+    }
+}
+
+#[cfg(test)]
+mod token_validation_tests {
+    use super::{QMatrix, validate_token_ids};
+    use std::io;
+
+    #[test]
+    fn accepts_ids_inside_the_vocabulary() {
+        assert!(validate_token_ids(&[0, 17, 99], 100).is_ok());
+    }
+
+    #[test]
+    fn rejects_a_token_from_a_different_vocabulary() {
+        let error = validate_token_ids(&[17, 100], 100).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(error.to_string().contains("tokenizer and GGUF match"));
+    }
+
+    #[test]
+    fn embedding_row_bounds_are_reported_as_an_error() {
+        let matrix = QMatrix {
+            rows: 1,
+            cols: 1,
+            ggml_type: 0,
+            row_bytes: 4,
+            data: 1.0f32.to_le_bytes().to_vec(),
+        };
+        assert_eq!(
+            matrix.row(1).unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
     }
 }
 

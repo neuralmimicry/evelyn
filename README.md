@@ -10,4 +10,23 @@ cargo run --release --bin evelyn-inspect -- model.gguf 0     # architecture, FFN
 cargo run --release --bin evelyn-verify-layer -- model.gguf 0 # stage 2 gate on a real layer
 ```
 
-Current status: stages 0, 1 and 2 pass. See the stage table in `docs/ARCHITECTURE.md`.
+Current status: stages 0–4c pass. The Stage 5 OpenAI-compatible shadow
+provider is implemented, with its hosted 200-chat, quality, and regression
+gate pending. Stage 4c was verified on qwen3:8b across qc04/qc05; see the
+stage table and measured latency/quality results in `docs/ARCHITECTURE.md`.
+
+To score increasing numbers of AARNN-served layers across multiple hosts,
+create a route manifest as shown in `docs/ARCHITECTURE.md`, then run:
+
+```
+cargo run --release --bin evelyn-scale -- model.gguf http://llama-server:8080 eval.txt 256 routes.json 1,2,4
+```
+
+The report includes per-layer latency, retries and fallbacks alongside the
+perplexity and total runtime latency. It exits non-zero if any sweep changes
+perplexity by 5% or more or uses a dense fallback, and reports the fastest
+passing multi-host layer count from the measured sweep.
+
+For Stage 5 shadow serving, `evelyn-serve` exposes the runtime at an
+OpenAI-compatible `/v1` endpoint. See the architecture document for the route
+manifest, tokenizer, API-key, and opt-in Gail profile requirements.

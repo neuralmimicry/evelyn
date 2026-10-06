@@ -1,4 +1,4 @@
-//! `evelyn-layer-mesh <model.gguf> <layer> <curves.json> <neuron> <outdir> <llama-server-url> <text-file> [tokens] [headroom]`
+//! `evelyn-layer-mesh <model.gguf> <layer> <curves.json> <neuron> <outdir> <llama-server-url> <text-file> [tokens] [headroom] [steps]`
 //!
 //! Stage 4b. It exports a knowledge-region mesh for one real layer,
 //! calibrated on **real mid-network activations**: the text is run through
@@ -11,7 +11,7 @@ use evelyn::import::import_ffn;
 use evelyn::mesh::{analog_output, export, plan};
 use evelyn::relative_error;
 use evelyn::remote::CaptureFfn;
-use evelyn::runtime::{Model, Session};
+use evelyn::runtime::{Model, Session, validate_token_ids};
 use serde_json::json;
 use std::path::Path;
 use std::process::ExitCode;
@@ -30,6 +30,13 @@ fn run(a: &[String]) -> Result<(), String> {
         .get(9)
         .map_or(Ok(2.0), |s| s.parse())
         .map_err(|_| "invalid headroom")?;
+    let steps: usize = a
+        .get(10)
+        .map_or(Ok(4000), |s| s.parse())
+        .map_err(|_| "invalid neuron steps")?;
+    if steps == 0 {
+        return Err("neuron steps must be greater than zero".into());
+    }
     let curves = MeasuredCurve::load_all(&a[3])?;
     let curve = curves
         .iter()
@@ -48,6 +55,7 @@ fn run(a: &[String]) -> Result<(), String> {
         .take(max_tokens)
         .collect();
     let model = Model::load(&a[1]).map_err(|e| format!("load: {e}"))?;
+    validate_token_ids(&toks, model.cfg.vocab).map_err(|e| e.to_string())?;
     let cap = CaptureFfn {
         model: &model,
         layer,
@@ -97,11 +105,16 @@ fn run(a: &[String]) -> Result<(), String> {
         &ffn.mlp,
         &p,
         curve,
-        4000,
-        400,
+        steps,
+        steps / 10,
     )
     .map_err(|e| format!("export: {e}"))?;
-    println!("exported mesh to {}", a[5]);
+    println!(
+        "exported mesh to {} ({} neuron steps, {} warm-up steps)",
+        a[5],
+        steps,
+        steps / 10
+    );
     Ok(())
 }
 

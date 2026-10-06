@@ -20,6 +20,7 @@ pub mod import;
 pub mod mesh;
 pub mod remote;
 pub mod runtime;
+pub mod server;
 pub mod snn;
 
 /// Root-mean-square error between two equal-length vectors.
