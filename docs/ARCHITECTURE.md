@@ -309,3 +309,20 @@ Each activation is a *heterogeneous-threshold population*:
 - **Learning safety:** plasticity is off until stage 6, and then gated by evals
   and snapshots. This is in line with the estate guard rails (Aria governance,
   verify-or-rollback).
+
+## Attachment to an existing SNN
+
+Evelyn exports `input_placement_policy: "sensory_near_existing_outputs"` in
+`mesh.json`. An explicit AARNN attachment must place every converted sensory
+input within a caller-calibrated millimetre contact distance of an existing
+output neuron. Preserve the existing network, imported identities, fitted
+weights and internal geometry; refuse an unplaceable import rather than warp it.
+Proximity provides an opportunity for later binding/growth, not evidence that
+growth or learning has occurred.
+
+AARNN owns geometry validation and the authorised atomic topology transaction.
+Standalone mesh evaluation does not attach to a live brain. The portable
+placement proposal requires selected target geometry, generation, capacity and
+ownership admission; live attachment, state rollback and biological acceptance
+remain separate qualification gates. Older mesh JSON receives the same default
+policy in AARNN when attachment is requested.
