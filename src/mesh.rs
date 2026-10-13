@@ -150,6 +150,7 @@ pub fn export(
         "gate_code": code_json(&plan.gate_code),
         "up_code": code_json(&plan.up_code),
         "up_scale_file": "up_scale.f32",
+        "input_placement_policy": "sensory_near_existing_outputs",
     });
     std::fs::write(dir.join("mesh.json"), serde_json::to_vec_pretty(&mesh)?)?;
     Ok(())
