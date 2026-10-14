@@ -30,3 +30,27 @@ passing multi-host layer count from the measured sweep.
 For Stage 5 shadow serving, `evelyn-serve` exposes the runtime at an
 OpenAI-compatible `/v1` endpoint. See the architecture document for the route
 manifest, tokenizer, API-key, and opt-in Gail profile requirements.
+
+## Container
+
+After CI passes on `main`, the build publishes the amd64/arm64 image as
+`ghcr.io/neuralmimicry/evelyn:latest` and a commit-specific tag. The image
+contains `evelyn-serve`; mount the GGUF and route manifest at runtime, and pass
+the matching tokenizer API URL. Supply `EVELYN_API_KEY` from the deployment's
+secret store.
+
+```sh
+podman run --rm --name evelyn-qwen35 \
+  -p 8080:8080 \
+  -e EVELYN_API_KEY \
+  -v /srv/models/qwen3.5-9b.gguf:/models/qwen3.5-9b.gguf:ro \
+  -v /srv/evelyn/routes.json:/config/routes.json:ro \
+  ghcr.io/neuralmimicry/evelyn:latest \
+  /models/qwen3.5-9b.gguf http://llama-server:8080 \
+  /config/routes.json 0.0.0.0:8080
+```
+
+`/healthz` is the container health check. `/v1/models` and chat requests
+require the bearer key. Deployments should pin the published digest and supply
+model files, route configuration and secrets through their native volume and
+secret managers.
