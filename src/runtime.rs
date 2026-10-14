@@ -860,6 +860,39 @@ mod token_validation_tests {
     }
 }
 
+#[cfg(test)]
+mod token_validation_tests {
+    use super::{QMatrix, validate_token_ids};
+    use std::io;
+
+    #[test]
+    fn accepts_ids_inside_the_vocabulary() {
+        assert!(validate_token_ids(&[0, 17, 99], 100).is_ok());
+    }
+
+    #[test]
+    fn rejects_a_token_from_a_different_vocabulary() {
+        let error = validate_token_ids(&[17, 100], 100).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(error.to_string().contains("tokenizer and GGUF match"));
+    }
+
+    #[test]
+    fn embedding_row_bounds_are_reported_as_an_error() {
+        let matrix = QMatrix {
+            rows: 1,
+            cols: 1,
+            ggml_type: 0,
+            row_bytes: 4,
+            data: 1.0f32.to_le_bytes().to_vec(),
+        };
+        assert_eq!(
+            matrix.row(1).unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
+    }
+}
+
 /// Index of the largest logit.
 pub fn argmax(v: &[f32]) -> u32 {
     v.iter()
